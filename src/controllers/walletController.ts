@@ -12,6 +12,7 @@ import {
   getAssociatedTokenAddress,
   getAccount,
   createTransferInstruction,
+  createAssociatedTokenAccountInstruction,
 } from "@solana/spl-token";
 import dotenv from "dotenv";
 import bs58 from "bs58";
@@ -96,6 +97,67 @@ export const calculateLLCPrice = async (): Promise<number> => {
   }
 };
 
+// Calculate LLC price in USD
+export const calculateLLCPriceUSD = async (): Promise<number> => {
+  try {
+    const llcPriceSOL = await calculateLLCPrice();
+    const solPriceUSD = await solPrice();
+
+    const llcPriceUSD = llcPriceSOL * solPriceUSD;
+    console.log(
+      `💰 LLC Price: ${llcPriceUSD.toFixed(
+        6
+      )} USD per LLC (LLC/SOL: ${llcPriceSOL.toFixed(
+        6
+      )}, SOL/USD: ${solPriceUSD.toFixed(2)})`
+    );
+    return llcPriceUSD;
+  } catch (error) {
+    console.error("Error calculating LLC price in USD:", error);
+    throw new Error("Failed to calculate LLC price in USD");
+  }
+};
+
+// Get comprehensive LLC pricing information
+export const getLLCPricingInfo = async (): Promise<{
+  llcPriceSOL: number;
+  llcPriceUSD: number;
+  solBalance: number;
+  llcBalance: number;
+  solPriceUSD: number;
+  ratio: string;
+}> => {
+  try {
+    const [solBalance, llcBalance, solPriceUSD] = await Promise.all([
+      getWalletSolBalance(),
+      getWalletLLCBalance(),
+      solPrice(),
+    ]);
+
+    if (llcBalance === 0) {
+      throw new Error("No LLC tokens available to calculate price");
+    }
+
+    const llcPriceSOL = solBalance / llcBalance;
+    const llcPriceUSD = llcPriceSOL * solPriceUSD;
+    const ratio = `1 LLC = ${llcPriceSOL.toFixed(
+      6
+    )} SOL = ${llcPriceUSD.toFixed(6)} USD`;
+
+    return {
+      llcPriceSOL,
+      llcPriceUSD,
+      solBalance,
+      llcBalance,
+      solPriceUSD,
+      ratio,
+    };
+  } catch (error) {
+    console.error("Error getting LLC pricing info:", error);
+    throw new Error("Failed to get LLC pricing info");
+  }
+};
+
 // Send LLC tokens to a wallet
 export const sendLLCTokens = async (
   toAddress: string,
@@ -119,6 +181,23 @@ export const sendLLCTokens = async (
       toPublicKey
     );
 
+    // Check if destination token account exists
+    let transaction = new Transaction();
+
+    try {
+      await getAccount(connection, toTokenAccount);
+    } catch (error) {
+      // Token account doesn't exist, create it
+      console.log(`🔧 Creating token account for ${toAddress}...`);
+      const createAccountInstruction = createAssociatedTokenAccountInstruction(
+        keypair.publicKey, // payer
+        toTokenAccount, // associated token account
+        toPublicKey, // owner
+        mintPublicKey // mint
+      );
+      transaction.add(createAccountInstruction);
+    }
+
     // Convert amount to token units
     const tokenAmount = Math.floor(amount * Math.pow(10, decimals));
 
@@ -130,8 +209,10 @@ export const sendLLCTokens = async (
       tokenAmount
     );
 
-    // Create and send transaction
-    const transaction = new Transaction().add(transferInstruction);
+    // Add transfer instruction to transaction
+    transaction.add(transferInstruction);
+
+    // Send transaction
     const signature = await sendAndConfirmTransaction(connection, transaction, [
       keypair,
     ]);

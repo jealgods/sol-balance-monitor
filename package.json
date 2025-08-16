@@ -8,7 +8,15 @@
     "start": "node dist/index.js",
     "clean": "rimraf dist",
     "prebuild": "npm run clean",
-    "postinstall": "npm run build"
+    "postinstall": "npm run build",
+    "pm2:start": "pm2 start ecosystem.config.js --env production",
+    "pm2:stop": "pm2 stop pool-monitor",
+    "pm2:restart": "pm2 restart pool-monitor",
+    "pm2:delete": "pm2 delete pool-monitor",
+    "pm2:logs": "pm2 logs pool-monitor",
+    "pm2:status": "pm2 status",
+    "pm2:monit": "pm2 monit",
+    "deploy": "npm run build && npm run pm2:start"
   },
   "dependencies": {
     "@solana/spl-token": "^0.3.9",
