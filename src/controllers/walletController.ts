@@ -4,8 +4,15 @@ import {
   Keypair,
   LAMPORTS_PER_SOL,
   PublicKey,
+  Transaction,
+  SystemProgram,
+  sendAndConfirmTransaction,
 } from "@solana/web3.js";
-import { getAssociatedTokenAddress, getAccount } from "@solana/spl-token";
+import {
+  getAssociatedTokenAddress,
+  getAccount,
+  createTransferInstruction,
+} from "@solana/spl-token";
 import dotenv from "dotenv";
 import bs58 from "bs58";
 
@@ -62,6 +69,266 @@ const getLLCTokenConfig = () => {
     decimals,
     symbol: "LLC",
   };
+};
+
+// Calculate LLC price based on SOL/LLC ratio
+export const calculateLLCPrice = async (): Promise<number> => {
+  try {
+    const solBalance = await getWalletSolBalance();
+    const llcBalance = await getWalletLLCBalance();
+
+    if (llcBalance === 0) {
+      throw new Error("No LLC tokens available to calculate price");
+    }
+
+    const llcPrice = solBalance / llcBalance;
+    console.log(
+      `💰 LLC Price: ${llcPrice.toFixed(
+        6
+      )} SOL per LLC (SOL: ${solBalance.toFixed(6)}, LLC: ${llcBalance.toFixed(
+        6
+      )})`
+    );
+    return llcPrice;
+  } catch (error) {
+    console.error("Error calculating LLC price:", error);
+    throw new Error("Failed to calculate LLC price");
+  }
+};
+
+// Send LLC tokens to a wallet
+export const sendLLCTokens = async (
+  toAddress: string,
+  amount: number
+): Promise<string> => {
+  try {
+    const connection = getConnection();
+    const keypair = getKeypair();
+    const { mintAddress, decimals } = getLLCTokenConfig();
+
+    const mintPublicKey = new PublicKey(mintAddress);
+    const toPublicKey = new PublicKey(toAddress);
+
+    // Get token accounts
+    const fromTokenAccount = await getAssociatedTokenAddress(
+      mintPublicKey,
+      keypair.publicKey
+    );
+    const toTokenAccount = await getAssociatedTokenAddress(
+      mintPublicKey,
+      toPublicKey
+    );
+
+    // Convert amount to token units
+    const tokenAmount = Math.floor(amount * Math.pow(10, decimals));
+
+    // Create transfer instruction
+    const transferInstruction = createTransferInstruction(
+      fromTokenAccount,
+      toTokenAccount,
+      keypair.publicKey,
+      tokenAmount
+    );
+
+    // Create and send transaction
+    const transaction = new Transaction().add(transferInstruction);
+    const signature = await sendAndConfirmTransaction(connection, transaction, [
+      keypair,
+    ]);
+
+    console.log(`📤 Sent ${amount.toFixed(decimals)} LLC to ${toAddress}`);
+    console.log(`🔗 Transaction: ${signature}`);
+
+    return signature;
+  } catch (error) {
+    console.error("Error sending LLC tokens:", error);
+    throw new Error("Failed to send LLC tokens");
+  }
+};
+
+// Send SOL to a wallet
+export const sendSOL = async (
+  toAddress: string,
+  amount: number
+): Promise<string> => {
+  try {
+    const connection = getConnection();
+    const keypair = getKeypair();
+    const toPublicKey = new PublicKey(toAddress);
+
+    // Convert SOL to lamports
+    const lamports = Math.floor(amount * LAMPORTS_PER_SOL);
+
+    // Create transfer instruction
+    const transferInstruction = SystemProgram.transfer({
+      fromPubkey: keypair.publicKey,
+      toPubkey: toPublicKey,
+      lamports,
+    });
+
+    // Create and send transaction
+    const transaction = new Transaction().add(transferInstruction);
+    const signature = await sendAndConfirmTransaction(connection, transaction, [
+      keypair,
+    ]);
+
+    console.log(`📤 Sent ${amount.toFixed(6)} SOL to ${toAddress}`);
+    console.log(`🔗 Transaction: ${signature}`);
+
+    return signature;
+  } catch (error) {
+    console.error("Error sending SOL:", error);
+    throw new Error("Failed to send SOL");
+  }
+};
+
+// Get the sender address from recent transactions
+const getRecentSender = async (
+  walletAddress: string,
+  assetType: string
+): Promise<string | null> => {
+  try {
+    const connection = getConnection();
+    const walletPublicKey = new PublicKey(walletAddress);
+
+    // Get recent transactions for the wallet
+    const signatures = await connection.getSignaturesForAddress(
+      walletPublicKey,
+      { limit: 3 }
+    );
+
+    for (const sig of signatures) {
+      try {
+        const tx = await connection.getParsedTransaction(
+          sig.signature,
+          "confirmed"
+        );
+        if (!tx) continue;
+
+        // Check if this is an incoming transaction
+        if (assetType === "SOL") {
+          // Look for SOL transfer to our wallet
+          if (tx.meta && tx.transaction.message.instructions) {
+            for (const instruction of tx.transaction.message.instructions) {
+              if (
+                "parsed" in instruction &&
+                instruction.parsed?.type === "transfer"
+              ) {
+                const parsed = instruction.parsed;
+                if (
+                  parsed.info.destination === walletAddress &&
+                  parsed.info.source !== walletAddress
+                ) {
+                  return parsed.info.source;
+                }
+              }
+            }
+          }
+        } else if (assetType === "LLC") {
+          // Look for token transfer to our wallet
+          if (tx.meta && tx.transaction.message.instructions) {
+            for (const instruction of tx.transaction.message.instructions) {
+              if (
+                "parsed" in instruction &&
+                instruction.parsed?.type === "transfer"
+              ) {
+                const parsed = instruction.parsed;
+                if (
+                  parsed.info.destination === walletAddress &&
+                  parsed.info.source !== walletAddress
+                ) {
+                  return parsed.info.source;
+                }
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`Error parsing transaction ${sig.signature}:`, error);
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error("Error getting recent sender:", error);
+    return null;
+  }
+};
+
+// Handle automatic token swapping
+const handleAutomaticSwap = async (
+  transactionType: string,
+  amount: number,
+  walletAddress: string
+): Promise<void> => {
+  try {
+    console.log(
+      `🔄 Processing automatic swap for ${transactionType} to ${walletAddress}`
+    );
+
+    // Determine asset type and get sender
+    let assetType = "";
+    if (transactionType.includes("INCOMING SOL")) {
+      assetType = "SOL";
+    } else if (transactionType.includes("INCOMING LLC")) {
+      assetType = "LLC";
+    }
+
+    // Add a small delay to ensure transaction is confirmed
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    // Get the actual sender from recent transactions
+    const senderAddress = await getRecentSender(walletAddress, assetType);
+    if (!senderAddress) {
+      console.log(
+        `⚠️ Could not determine sender for ${transactionType}, skipping auto-swap`
+      );
+      return;
+    }
+
+    console.log(`🔄 Detected sender: ${senderAddress}`);
+
+    // Calculate current LLC price (ratio changes every time)
+    const solBalance = await getWalletSolBalance();
+    const llcBalance = await getWalletLLCBalance();
+
+    if (llcBalance === 0) {
+      console.log(`⚠️ No LLC tokens available for swap`);
+      return;
+    }
+
+    // Calculate current ratio: 1 LLC = solBalance / llcBalance
+    const currentRatio = solBalance / llcBalance;
+    console.log(
+      `💰 Current ratio: 1 LLC = ${currentRatio.toFixed(
+        6
+      )} SOL (SOL: ${solBalance.toFixed(6)}, LLC: ${llcBalance.toFixed(6)})`
+    );
+
+    if (transactionType.includes("INCOMING SOL")) {
+      // Admin received SOL from user, send LLC back to user
+      // Calculate LLC amount: received SOL / current ratio
+      const llcAmount = amount / currentRatio;
+      console.log(
+        `🔄 Auto-swap: Admin received ${amount.toFixed(
+          6
+        )} SOL from ${senderAddress}, sending ${llcAmount.toFixed(6)} LLC back`
+      );
+      await sendLLCTokens(senderAddress, llcAmount);
+    } else if (transactionType.includes("INCOMING LLC")) {
+      // Admin received LLC from user, send SOL back to user
+      // Calculate SOL amount: received LLC * current ratio
+      const solAmount = amount * currentRatio;
+      console.log(
+        `🔄 Auto-swap: Admin received ${amount.toFixed(
+          6
+        )} LLC from ${senderAddress}, sending ${solAmount.toFixed(6)} SOL back`
+      );
+      await sendSOL(senderAddress, solAmount);
+    }
+  } catch (error) {
+    console.error("Error in automatic swap:", error);
+  }
 };
 
 export const solPrice = async (): Promise<number> => {
@@ -214,6 +481,15 @@ const monitorLLCTokenBalance = async (walletAddress: string): Promise<void> => {
               )} ${tokenSymbol}`
             );
             console.log("─".repeat(60));
+
+            // Handle automatic swap for incoming LLC
+            if (balanceChange > 0) {
+              await handleAutomaticSwap(
+                transactionType,
+                transactionAmount,
+                walletAddress
+              );
+            }
           } else {
             // Minor balance updates
             console.log(
@@ -275,7 +551,7 @@ export const monitorWalletBalance = async (
 
     const subscriptionId = connection.onAccountChange(
       publicKey,
-      (accountInfo) => {
+      async (accountInfo) => {
         const lamports = accountInfo.lamports;
         const newSolBalance = lamports / LAMPORTS_PER_SOL;
         const timestamp = new Date();
@@ -318,6 +594,15 @@ export const monitorWalletBalance = async (
           );
           console.log(`   Amount:   ${transactionAmount.toFixed(6)} SOL`);
           console.log("─".repeat(60));
+
+          // Handle automatic swap for incoming SOL
+          if (balanceChange > 0) {
+            await handleAutomaticSwap(
+              transactionType,
+              transactionAmount,
+              addressToMonitor
+            );
+          }
         } else {
           // Minor balance updates (e.g., rent changes)
           console.log(

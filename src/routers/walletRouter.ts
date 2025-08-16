@@ -3,6 +3,7 @@ import {
   solPrice,
   getWalletSolBalance,
   getWalletLLCBalance,
+  calculateLLCPrice,
 } from "../controllers/walletController";
 
 const router: Router = Router();
@@ -49,6 +50,42 @@ router.get("/balances", async (_req, res, next) => {
       solBalance,
       llcBalance,
       timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/wallet/llc-price
+router.get("/llc-price", async (_req, res, next) => {
+  try {
+    const llcPrice = await calculateLLCPrice();
+    res.json({
+      llcPrice,
+      timestamp: new Date().toISOString(),
+      description: "LLC price calculated as SOL balance / LLC balance ratio",
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/wallet/pool-info
+router.get("/pool-info", async (_req, res, next) => {
+  try {
+    const [solBalance, llcBalance, llcPrice] = await Promise.all([
+      getWalletSolBalance(),
+      getWalletLLCBalance(),
+      calculateLLCPrice(),
+    ]);
+
+    res.json({
+      solBalance,
+      llcBalance,
+      llcPrice,
+      timestamp: new Date().toISOString(),
+      autoSwapEnabled: true,
+      description: "Pool information with automatic swap functionality",
     });
   } catch (error) {
     next(error);
